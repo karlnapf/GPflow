@@ -7,10 +7,13 @@ from GPflow.svgp_additive import SVGP_additive
 import numpy as np
 
 
+np.random.seed(0)
+
+
 # build a very simple data set:
-N = 100
-M = 20
-D = 2
+N = 10
+M = 2
+D = 1
 X = np.random.rand(N, D)
 Z = X[np.random.permutation(N)[:M]]
 

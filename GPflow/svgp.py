@@ -38,6 +38,7 @@ class SVGP(GPModel):
         self.num_inducing = Z.shape[0]
 
         self.q_mu = Param(np.zeros((self.num_inducing, self.num_latent)))
+        
         if self.q_diag:
             self.q_sqrt = Param(np.ones((self.num_inducing, self.num_latent)), transforms.positive)
         else:
@@ -48,6 +49,8 @@ class SVGP(GPModel):
             if self.q_diag:
                 KL = kullback_leiblers.gauss_kl_white_diag(self.q_mu, self.q_sqrt, self.num_latent)
             else:
+                print self.q_mu
+                assert()
                 KL = kullback_leiblers.gauss_kl_white(self.q_mu, self.q_sqrt, self.num_latent)
         else:
             K = self.kern.K(self.Z) + eye(self.num_inducing) * 1e-6
