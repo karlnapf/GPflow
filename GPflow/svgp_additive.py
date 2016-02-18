@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from param import Param
+from param import Param, ParamList
 from .model import GPModel
 import transforms
 import conditionals
@@ -20,37 +20,32 @@ class SVGP_additive(GPModel):
         # TODO: allow for passing single elements which are then broadcasted to a list automatically
         
         if mean_function is None:
-            mean_function = [Zero() for _ in range(len(kern))]
+            mean_function = [Zero() for _ in range(len(Z))]
         
         GPModel.__init__(self, X, Y, kern, likelihood, mean_function)
         self.q_diag, self.whiten = q_diag, whiten
         self.num_latent = num_latent or Y.shape[1]
         self.num_inducing = [z.shape[0] for z in Z]
-        
-        for d in range(len(Z)):
-            val = Param(Z[d])
-            self.__setattr__('Z_%d' % d, val)
 
-        for d in range(len(Z)):
-            val = Param(np.zeros((Z[d].shape[0], self.num_latent)))
-            self.__setattr__('q_mu_%d' % d, val)
-        
+
+
+        self.Z = ParamList([Param(z) for z in Z])
+        self.q_mu = ParamList([Param(np.zeros((z.shape[0], self.num_latent))) for z in Z])
+
         if self.q_diag:
-            for d in range(len(Z)):
-                val = Param(np.ones((Z[d].shape[0], self.num_latent)), transforms.positive)
-                self.__setattr__('q_sqrt_%d' % d, val)
+            self.q_sqrt = ParamList([Param(np.ones((z.shape[0], self.num_latent)), transforms.positive) for z in Z])
         else:
-            for d in range(len(Z)):
-                val = Param(np.array([np.eye(Z[d].shape[0]) for _ in range(self.num_latent)]).swapaxes(0,2))
-                self.__setattr__('q_sqrt_%d' % d, val)
-                
+            self.q_sqrt = ParamList([Param(np.array([np.eye(z.shape[0]) for _ in range(self.num_latent)]).swapaxes(0,2)) for z in Z])
+
+
+
     def build_prior_KL(self):
         KL = None
         
         for d in xrange(self.X.shape[1]):
-            q_mu_d = self.__getattribute__('q_mu_%d' % d)
-            q_sqrt_d = self.__getattribute__('q_sqrt_%d' % d)
-            Z_d = self.__getattribute__('Z_%d' % d)
+            q_mu_d = self.q_mu[d]
+            q_sqrt_d = self.q_sqrt[d]
+            Z_d = self.Z[d]
             
             if self.whiten:
                 if self.q_diag:
@@ -58,7 +53,7 @@ class SVGP_additive(GPModel):
                 else:
                     KL_d = kullback_leiblers.gauss_kl_white(q_mu_d, q_sqrt_d, self.num_latent)
             else:
-                K = self.kern[d].K(Z_d) + eye(self.num_inducing[d]) * 1e-6
+                K = self.kern.K(Z_d) + eye(self.num_inducing[d]) * 1e-6
                 if self.q_diag:
                     KL_d = kullback_leiblers.gauss_kl_diag(q_mu_d, q_sqrt_d, K, self.num_latent)
                 else:
@@ -85,18 +80,18 @@ class SVGP_additive(GPModel):
         fvar = None
         for d in xrange(self.X.shape[1]):
             x_d_as_2d = self.X[:, d].reshape(len(self.X), 1)
-            q_mu_d = self.__getattribute__('q_mu_%d' % d)
-            q_sqrt_d = self.__getattribute__('q_sqrt_%d' % d)
-            Z_d = self.__getattribute__('Z_%d' % d)
+            q_mu_d = self.q_mu[d]
+            q_sqrt_d = self.q_sqrt[d]
+            Z_d = self.Z[d]
             
             # Get conditionals
             if self.whiten:
-                fmean_d, fvar_d = conditionals.gaussian_gp_predict_whitened(x_d_as_2d, Z_d, self.kern[d], q_mu_d, q_sqrt_d, self.num_latent)
+                fmean_d, fvar_d = conditionals.gaussian_gp_predict_whitened(x_d_as_2d, Z_d, self.kern, q_mu_d, q_sqrt_d, self.num_latent)
             else:
-                fmean_d, fvar_d = conditionals.gaussian_gp_predict(x_d_as_2d, Z_d, self.kern[d], q_mu_d, q_sqrt_d, self.num_latent)            
+                fmean_d, fvar_d = conditionals.gaussian_gp_predict(x_d_as_2d, Z_d, self.kern, q_mu_d, q_sqrt_d, self.num_latent)
     
             # add in mean function to conditionals.
-            fmean_d += self.mean_function(x_d_as_2d)
+            fmean_d += self.mean_function[d](x_d_as_2d)
             
             # add things up, we were too lazy to check the type of fmean_d, fvar_d
             if fmean is None or fvar is None:
@@ -111,23 +106,28 @@ class SVGP_additive(GPModel):
         
         return tf.reduce_sum(variational_expectations) - KL
 
+    def build_predict_single(self, Xnew, d):
+
+        xnew_d_as_2d = tf.expand_dims(Xnew[:, d],1)
+        q_mu_d = self.q_mu[d]
+        q_sqrt_d = self.q_sqrt[d]
+        Z_d = self.Z[d]
+
+        if self.whiten:
+            mu_d, var_d = conditionals.gaussian_gp_predict_whitened(xnew_d_as_2d, Z_d, self.kern, q_mu_d, q_sqrt_d, self.num_latent)
+        else:
+            mu_d, var_d = conditionals.gaussian_gp_predict(xnew_d_as_2d, Z_d, self.kern, q_mu_d, q_sqrt_d, self.num_latent)
+        mu_d += self.mean_function[d](xnew_d_as_2d)
+        return mu_d, var_d
+
     def build_predict(self, Xnew):
         mu = None
         var = None
-        
+
         for d in xrange(self.X.shape[1]):
-            xnew_d_as_2d = Xnew[:, d].reshape(len(Xnew), 1)
-            q_mu_d = self.__getattribute__('q_mu_%d' % d)
-            q_sqrt_d = self.__getattribute__('q_sqrt_%d' % d)
-            Z_d = self.__getattribute__('Z_%d' % d)
-            
-            if self.whiten:
-                mu_d, var_d = conditionals.gaussian_gp_predict_whitened(xnew_d_as_2d, Z_d, self.kern[d], q_mu_d, q_sqrt_d, self.num_latent)
-            else:
-                mu_d, var_d = conditionals.gaussian_gp_predict(xnew_d_as_2d, Z_d, self.kern[d], q_mu_d, q_sqrt_d, self.num_latent)
-        
-            mu_d += self.mean_function[d](xnew_d_as_2d)
-            
+
+            mu_d, var_d = self.build_predict_single( Xnew, d)
+
             # add things up, we were too lazy to check the type of fmean_d, fvar_d
             if mu is None or var is None:
                 mu = mu_d
@@ -137,4 +137,6 @@ class SVGP_additive(GPModel):
                 var += var_d
         
         return mu, var
+
+
 
